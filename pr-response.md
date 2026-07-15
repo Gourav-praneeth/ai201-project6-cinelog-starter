@@ -3,27 +3,40 @@
 ## AI Usage
 <!-- Fill in at the end — how you used AI tools during this project -->
 
+**Comments 4 & 5 (devil's-advocate stress test):** After drafting my initial positions, I gave an AI agent both drafts plus the relevant codebase facts and asked: "What counterargument would a careful code reviewer raise against this position? What tradeoff am I not acknowledging?" It surfaced one point I hadn't checked and one framing issue:
+
+- For Comment 4, it flagged that my "3 friends want to watch this" discovery framing assumed a social graph exists. I verified with `grep -rniE "friend|follow" --include="*.py" .` and confirmed there is no friends/followers concept anywhere in the app — `public=True` means visible app-wide, not "shared with people you know." I also verified no route or service currently reads/filters on the `public` field at all. Both facts changed my reasoning: I kept the same position (`public=True`) but rewrote the tradeoff section to be honest about the actual (larger) scope of exposure and to note the field is currently inert scaffolding for a feature that doesn't exist yet.
+- For Comment 5, it pointed out that my secondary "recency matches the use case" argument was asserted, not demonstrated, and that packaging it alongside the consistency argument overstated how strong my case was. I dropped that secondary argument and reframed the response as one solid reason (API consistency) overriding one real, unmitigated cost (scannability of long lists), rather than two independent reasons plus a hand-waved mitigation.
+
+I did not have the AI write the arguments — I verified its claims myself (grep) before revising, and the final positions/reasoning above are my own.
+
 ## Comment 1 — Rename
-**What I did:**
-**How I verified:**
+**What I did:** `services/watchlist_service.py` already defined `add_to_watchlist()` (this was already correct before I touched anything for Comment 2). The stale name only remained on the caller side: `routes/watchlist/watchlist.py` still imported and called `save_to_watchlist`. Updated both the import and the call site to `add_to_watchlist`.
+**How I verified:** Ran a project-wide `grep -rn "save_to_watchlist" --include="*.py" .` — zero matches remain. Then booted the app via `create_app()` (which was previously impossible — the stale import raised `ImportError` at startup) and hit `POST /watchlist/<user_id>/add` through Flask's test client; it returned 201 instead of erroring. Note: while verifying, `GET /watchlist/<user_id>` surfaced a separate, pre-existing bug — `WatchlistEntry` has no relationship/backref to `Film`, so `entry.film` raises `AttributeError` in `get_watchlist()`. That's unrelated to this rename and out of scope for Comment 1, so I left it as-is and flagged it separately.
 
 ## Comment 2 — Deduplication
-**What I did:**
-**How I verified:**
+**What I did:** Added an `AlreadyInWatchlistError` exception and a duplicate check to `add_to_watchlist()` in `services/watchlist_service.py`, mirroring `add_to_collection()` in `services/collection_service.py` exactly: query `WatchlistEntry` for an existing `(user_id, film_id)` row before inserting, and raise if one is found instead of creating a second entry.
+**How I verified:** Since `routes/watchlist/watchlist.py` currently imports a nonexistent `save_to_watchlist` (the mismatch that Comment 1's rename addresses), `create_app()` can't be instantiated yet, so I couldn't exercise this through the HTTP route. Instead I built a minimal Flask app in a throwaway script, called `add_to_watchlist()` twice with the same `user_id`/`film_id`: the first call created the entry normally, the second raised `AlreadyInWatchlistError` as expected instead of creating a duplicate row.
 
 ## Comment 3 — Missing test
-**What I did:**
-**How I verified:**
+**What I did:** Created `tests/test_watchlist.py`, modeled directly on `test_add_to_collection_nonexistent_film_raises` in `tests/test_collection.py`. Copied that file's `app`/`sample_user`/`sample_film` fixture structure (in-memory SQLite app, a plain `User`, a plain `Film`) and wrote `test_add_to_watchlist_nonexistent_film_raises`, which asserts that calling `add_to_watchlist()` with a nonexistent `film_id` raises `FilmNotFoundError` rather than hitting a database integrity error — same fixture setup, same `pytest.raises` assertion shape, just swapped to the watchlist service and model names.
+**How I verified:** Ran `pytest tests/test_watchlist.py -v` — 1 passed. Then ran the full suite, `pytest tests/ -v` — all 5 tests passed (4 existing collection tests + the new watchlist test), confirming the rename (Comment 1) and dedup logic (Comment 2) didn't break anything already covered.
 
 ## Comment 4 — Default visibility
-**My position:**
-**Reasoning:**
-**Tradeoff acknowledged:**
+**My position:** Keep `public=True` as the default for `WatchlistEntry.public`.
+
+**Reasoning:** CineLog's stated identity (per README) is a *community* film-tracking app, and defaults are sticky — the overwhelming majority of users never touch a visibility toggle, so whatever ships as the default is effectively permanent behavior for nearly everyone. I checked, and right now `public` is the only visibility field anywhere in the app: `CollectionEntry` (watched films + ratings) has no privacy control at all, so a user's full viewing history and ratings are already unconditionally exposed. Given that, making watchlist private-by-default wouldn't actually protect a meaningfully sensitive slice of the user's data — their more revealing data (what they've actually watched and rated) stays fully exposed regardless — it would just create one narrow, private-by-default island inside an app whose whole current posture is "nothing is protected." That's arguably worse than consistent public-by-default, because a lone privacy toggle gives users a false signal that their data is being protected in general, when it isn't.
+
+**Tradeoff acknowledged:** I stress-tested this reasoning against a skeptical read, and the strongest pushback is this: I grepped the codebase for any friends/followers concept (`grep -rniE "friend|follow"`) and found none — there is no social graph at all. So `public=True` doesn't mean "visible to people I know" the way a "3 friends want to watch this" pitch implies; it means visible app-wide to any user, which is a bigger exposure than the discovery narrative suggests. I also confirmed no route or service currently reads or filters on the `public` field at all (it's written but never queried), so today this default has zero live effect — it's scaffolding for a future discovery/feed feature that doesn't exist yet, and whatever default we ship now is what existing rows will carry once that feature lands. And watchlisting is a lower-friction, more impulsive action than logging a watched+rated film — a single click to save something you're merely curious about can end up broadcasting a more tentative or embarrassing interest than a deliberate, completed rating would. I'm accepting that risk in exchange for the app's engagement/discovery goals, but it's a real cost, not a hypothetical one, and it should be revisited once an actual discovery surface is built and social scoping (e.g., friends-only visibility) becomes possible.
 
 ## Comment 5 — Sort order
-**My position:**
-**Reasoning:**
-**Engagement with reviewer's point:**
+**My position:** Switch `get_watchlist()` to sort by `date_added` descending (newest first), matching `get_collection()`.
+
+**Reasoning:** `get_collection()` already sorts newest-first, and its docstring explicitly documents that as intentional. `get_watchlist()`'s current alphabetical order (`Film.title.asc()`) has no docstring justification and looks like it fell out of the `.join(Film)` query rather than being a deliberate choice. Two endpoints in the same API returning list data with different, unstated sort semantics forces any API consumer (frontend, future integrations) to special-case each one instead of relying on one shared convention.
+
+**Engagement with reviewer's point:** The reviewer's underlying argument is consistency, and I buy that as the primary reason to change this. I initially also reached for a secondary argument — that recency matches the watchlist's use case, since a "queue of things to get to" surfaces the freshest addition on top. Stress-testing that against a skeptical read, I don't think it holds up as an independently strong reason: it's asserted, not demonstrated, and I have no actual evidence users care more about recency than, say, priority when opening a watchlist. So I'm dropping it and treating this as what it actually is — one solid reason (API consistency) overriding one real, unmitigated cost.
+
+That cost: alphabetical ordering is genuinely better for scanning a long list to check "is X already on here?" Watchlists can grow larger than collections over time, since people add far more things they merely *intend* to watch than they'll ever finish, so a 200-film watchlist sorted by date-added is meaningfully harder to scan for a specific title than one sorted alphabetically. The right long-term fix is a client-side or `?sort=title` query param, but that's not built here — I'm explicitly shipping a default that's worse for the "is this already saved" scan pattern, in exchange for consistency with collection. That's a deliberate tradeoff I'm making, not one I'm resolving.
 
 ## Comment 6 — Rebase
 **What conflicted:**
