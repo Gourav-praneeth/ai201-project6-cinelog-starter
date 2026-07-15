@@ -28,6 +28,10 @@ def create_app(config=None):
     app.register_blueprint(collection_bp, url_prefix="/collection")
     app.register_blueprint(watchlist_bp, url_prefix="/watchlist")
 
+    @app.route("/", methods=["GET"])
+    def index():
+        return {"status": "ok", "service": "CineLog API"}
+
     with app.app_context():
         db.create_all()
 
